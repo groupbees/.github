@@ -1,0 +1,105 @@
+name: skills-module
+
+# Shared CI for every GroupBees skills module (skills-core, skills-opensource,
+# …). A module calls it with one job:
+#
+#   jobs:
+#     ci:
+#       uses: groupbees/.github/.github/workflows/skills-module.yml@<sha>  # vX.Y.Z
+#
+# and Dependabot (github-actions) bumps that pin. The tool versions below are
+# the only place a module's CI tools are pinned.
+on:
+  workflow_call:
+    inputs:
+      allow-dirs:
+        description: Extra skill directories skill-validator accepts (comma-separated).
+        type: string
+        default: templates
+
+permissions:
+  contents: read
+
+env:
+  # agent-ecosystem/skill-validator — pinned; bump deliberately.
+  SKILL_VALIDATOR_VERSION: v1.6.2
+  # groupbees/pollen — pinned release. Not named POLLEN_*: that prefix is
+  # pollen's own config namespace.
+  PIN_POLLEN_VERSION: v0.4.0
+
+jobs:
+  validate-skills:
+    name: Validate SKILL.md
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install skill-validator
+        run: go install "github.com/agent-ecosystem/skill-validator/cmd/skill-validator@${SKILL_VALIDATOR_VERSION}"
+
+      # The validator takes one skill directory at a time and modules nest
+      # skills under a domain (skills/<domain>/<name>/), so we loop.
+      # --strict: warnings fail the build.
+      - name: skill-validator check
+        env:
+          ALLOW_DIRS: ${{ inputs.allow-dirs }}
+        run: |
+          failed=0
+          for skill in $(find skills -name SKILL.md -exec dirname {} \; | sort); do
+            echo "::group::$skill"
+            skill-validator check --strict --allow-dirs="$ALLOW_DIRS" \
+              --emit-annotations "$skill" || failed=$((failed + 1))
+            echo "::endgroup::"
+            {
+              echo "### $skill"
+              skill-validator check --allow-dirs="$ALLOW_DIRS" -o markdown "$skill" || true
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "$failed skill(s) failed validation."
+          test "$failed" -eq 0
+
+  pollen-validate:
+    name: pollen validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # Release archive (static Linux binary), checked against SHA256SUMS.
+      - name: Install pollen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP"
+          archive="pollen-x86_64-unknown-linux-musl-${PIN_POLLEN_VERSION}.tar.gz"
+          gh release download "$PIN_POLLEN_VERSION" --repo groupbees/pollen \
+            --pattern "$archive" --pattern SHA256SUMS
+          sha256sum --check --ignore-missing SHA256SUMS
+          mkdir pollen && tar -xzf "$archive" -C pollen
+          echo "$RUNNER_TEMP/pollen/${archive%.tar.gz}" >> "$GITHUB_PATH"
+      # The module's own pollen.yaml (repo: local) deploys every skill: the
+      # same check a consumer's `pollen update` runs.
+      - run: pollen validate
+
+  check-catalog:
+    name: Catalog (README table, unique names)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Check generated table
+        run: scripts/skills-catalog.sh --check-readme
+      # Skills deploy flat: skills/<domain>/<name> must be unique on <name>.
+      - name: Check unique skill names
+        run: scripts/skills-catalog.sh --check-names
+
+  lint-scripts:
+    name: Lint scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # The catalog script, plus any script a skill bundles in templates/.
+      # shellcheck ships on the GitHub runners.
+      - run: find scripts skills -name '*.sh' -print0 | xargs -0 shellcheck
