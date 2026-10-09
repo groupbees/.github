@@ -80,9 +80,15 @@ jobs:
           sha256sum --check --ignore-missing SHA256SUMS
           mkdir pollen && tar -xzf "$archive" -C pollen
           echo "$RUNNER_TEMP/pollen/${archive%.tar.gz}" >> "$GITHUB_PATH"
-      # The module's own pollen.yaml (repo: local) deploys every skill: the
-      # same check a consumer's `pollen update` runs.
-      - run: pollen validate
+      # A module ships no pollen.yaml (that is the consumer's file), so the
+      # check writes a throwaway one at the root — `repo: local` resolves
+      # against the config's directory — selecting every skill, and runs the
+      # same validation a consumer's `pollen update` does.
+      - name: pollen validate (every skill of the module)
+        run: |
+          printf 'repos:\n  - repo: local\n    paths:\n      - path: skills\n        recurse: true\n' \
+            > .pollen-ci.yaml
+          pollen validate --config .pollen-ci.yaml
 
   check-catalog:
     name: Catalog (README table, unique names)
